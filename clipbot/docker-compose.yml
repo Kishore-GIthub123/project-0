@@ -1,14 +1,29 @@
+# Optional. On Windows the recommended setup is native (scripts\setup_windows.ps1) with the Ollama app.
+# With Docker Desktop, the containers reach the Ollama app on the host via host.docker.internal.
+x-clipbot: &clipbot
+  build: .
+  env_file: .env
+  environment:
+    OLLAMA_BASE_URL: ${DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  volumes: ["./data:/app/data"]
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  restart: unless-stopped
+
 services:
   worker:
-    build: .
+    <<: *clipbot
     command: python -m clipbot.worker
-    env_file: .env
-    volumes: ["./data:/app/data"]
-    restart: unless-stopped
   dashboard:
-    build: .
+    <<: *clipbot
     command: uvicorn clipbot.dashboard:app --host 0.0.0.0 --port 8000
-    env_file: .env
-    volumes: ["./data:/app/data"]
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
+
+  # Optional Ollama in Docker (CPU). Start with:  docker compose --profile ollama up -d
+  # and set DOCKER_OLLAMA_BASE_URL=http://ollama:11434 in .env. GPU in Docker needs extra setup
+  # (https://hub.docker.com/r/ollama/ollama) - the native Ollama app is simpler on Windows.
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    profiles: ["ollama"]
+    volumes: ["./data/ollama:/root/.ollama"]
+    ports: ["127.0.0.1:11434:11434"]
     restart: unless-stopped

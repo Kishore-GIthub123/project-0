@@ -170,3 +170,107 @@ def test_twitch_outage_does_not_block_pipeline(tmp_path):
     w.run_once()
     assert db.all()[0]["status"] == "pending_review"
     assert db.get_kv("status").startswith("ERROR (Twitch)")
+
+
+# ---- AI provider integration in the worker (MOCKED Ollama over real HTTP)
+TIMED = "[00:00] Chat look we are inside the bank right now\n[00:04] The alarm is going off go go go"
+
+
+def _ollama_worker(tmp_path, fake, src, voice, transcribe=lambda *a: TIMED, **cfgkw):
+    from clipbot.providers import OllamaProvider
+    c = cfg(tmp_path, commentary_mode=True, ig_user_id="", **cfgkw)
+    calls = {"transcribe": 0}
+
+    def tr(*a):
+        calls["transcribe"] += 1
+        return transcribe(*a)
+
+    w = Worker(c, DB(tmp_path / "t.db"), FakeTwitch(), download=lambda u, d, i: src, transcribe=tr,
+               speak=lambda text, out, models, v, speed: voice,
+               provider=OllamaProvider(fake.url, "qwen3:4b", retries=0))
+    return w, calls
+
+
+def test_worker_generates_script_with_ollama(tmp_path, fake_ollama):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 1)
+    fake = fake_ollama(reply="Nobody walks into a bank this calmly. Then the alarm decides the plan for him.")
+    w, calls = _ollama_worker(tmp_path, fake, src, voice, yt_client_id="")
+    w.run_once()
+    row = w.db.all()[0]
+    assert row["status"] == "pending_review" and row["script"].startswith("Nobody walks")
+    assert row["style"] == w.cfg.commentary_style and "[00:04] The alarm" in fake.requests[0]["messages"][1]["content"]
+    assert "ollama/qwen3:4b" in w.db.get_kv("ai_last_success")
+
+    # dashboard "new AI script in this style": transcript is reused, only the script is regenerated
+    w.db.update("c1", style="hype", status="needs_script")
+    w.run_once()
+    assert calls["transcribe"] == 1 and w.db.all()[0]["style"] == "hype" and "Hype commentary" in fake.requests[-1]["messages"][1]["content"]
+
+
+def test_worker_flags_insufficient_transcript_for_manual_review(tmp_path, fake_ollama):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 1)
+    fake = fake_ollama()
+    w, _ = _ollama_worker(tmp_path, fake, src, voice, transcribe=lambda *a: "[00:00] uh")
+    w.run_once()
+    row = w.db.all()[0]
+    assert row["status"] == "needs_manual" and row["error"].startswith("manual:") and fake.requests == []
+    # human writes the script in the dashboard -> narration + video are produced
+    w.db.update("c1", script="My own words about this moment, written by hand.", status="script_ready")
+    w.run_once()
+    assert w.db.all()[0]["status"] == "pending_review"
+
+
+def test_worker_records_ai_errors(tmp_path, fake_ollama):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 1)
+    fake = fake_ollama(models=["something-else:1b"])
+    w, _ = _ollama_worker(tmp_path, fake, src, voice)
+    w.run_once()
+    row = w.db.all()[0]
+    assert row["status"] == "failed" and "ollama pull qwen3:4b" in row["error"]
+    assert "ollama pull qwen3:4b" in w.db.get_kv("ai_last_error")
+    assert row["script"] is None  # never falls back to a hard-coded script
+
+
+def test_cleanup_removes_intermediates_after_reject(tmp_path):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 1)
+    db = DB(tmp_path / "t.db")
+    w = Worker(cfg(tmp_path, commentary_mode=True), db, FakeTwitch(), download=lambda u, d, i: src,
+               transcribe=lambda *a: TIMED, draft_script=lambda *a: "A written take on the moment here.",
+               speak=lambda text, out, models, v, speed: voice)
+    w.run_once()
+    row = db.all()[0]
+    vertical, final = Path(row["vertical_path"]), Path(row["edited_path"])
+    assert vertical.exists() and final.exists()
+    db.update("c1", status="rejected")
+    w.run_once()
+    row = db.all()[0]
+    assert not vertical.exists() and final.exists() and row["vertical_path"] is None
+
+
+def test_captions_are_burned_into_final(tmp_path):
+    from clipbot import tts as T
+    src = tmp_path / "src.mp4"
+    make_video(src)
+
+    class Eng:
+        def create(self, text, voice, speed, lang):
+            import numpy as np
+            return (0.3 * np.sin(np.linspace(0, 400, 24000))).astype("float32"), 24000
+
+    db = DB(tmp_path / "t.db")
+    w = Worker(cfg(tmp_path, commentary_mode=True, watermark_text="@me"), db, FakeTwitch(),
+               download=lambda u, d, i: src, transcribe=lambda *a: TIMED,
+               draft_script=lambda *a: "First line here. Second line here.",
+               speak=lambda text, out, models, v, speed: T.speak(text, out, models, v, speed, engine=Eng()))
+    w.run_once()
+    ass = (tmp_path / "captions" / "c1.ass").read_text(encoding="utf-8")
+    assert "First" in ass and "@me" in ass and "Clip: Streamer on Twitch" in ass
+    assert db.all()[0]["status"] == "pending_review"
