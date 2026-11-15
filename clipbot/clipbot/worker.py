@@ -127,21 +127,26 @@ class Worker:
         if datetime.now(timezone.utc) < self.cfg.activate_at:
             self.status(f"Waiting for activation at {self.cfg.activate_at.isoformat()}")
             return
-        if not self.game_id:
-            self.game_id = self.tw.game_id(self.cfg.game_name)
+        # Twitch problems must not block clips that are already in the pipeline
+        added, note = 0, ""
+        try:
             if not self.game_id:
-                self.status(f"'{self.cfg.game_name}' not found on Twitch yet")
-                return
-        if not self.cfg.allowed_broadcasters:
-            self.status("ALLOWED_BROADCASTERS is empty - add streamers who gave permission")
-            return
-        added = self.discover()
+                self.game_id = self.tw.game_id(self.cfg.game_name)
+            if not self.game_id:
+                note = f"'{self.cfg.game_name}' not found on Twitch yet"
+            elif not self.cfg.allowed_broadcasters:
+                note = "ALLOWED_BROADCASTERS is empty - add streamers who gave permission"
+            else:
+                added = self.discover()
+        except Exception as e:  # noqa: BLE001
+            log.exception("twitch discovery failed")
+            note = f"ERROR (Twitch): {e}"
         self.process_new()
         self.process_scripts()
         self.process_tts()
         self.process_voiced()
         self.publish()
-        self.status(f"Active: {added} new clips this run")
+        self.status(note or f"Active: {added} new clips this run")
 
     def run_forever(self):
         while True:

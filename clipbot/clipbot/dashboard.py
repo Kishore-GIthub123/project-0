@@ -69,6 +69,10 @@ def health():
     return {"status": db.get_kv("status"), "heartbeat": db.get_kv("heartbeat")}
 
 
+RETRY_FROM = {"edit": "new", "script": "needs_script", "tts": "script_ready", "mix": "voice_ready",
+              "publish": "approved"}
+
+
 def _clip(clip_id: str):
     row = db.conn.execute("SELECT * FROM clips WHERE id=?", (clip_id,)).fetchone()
     if not row:
@@ -176,7 +180,13 @@ def save_script(clip_id: str, script: str = Form(...)):
 # generic route last so /clip/{id}/voice is matched first
 @app.post("/clip/{clip_id}/{action}", dependencies=[Depends(auth)])
 def act(clip_id: str, action: str):
-    status = {"approve": "approved", "reject": "rejected", "retry": "new"}.get(action)
+    c = _clip(clip_id)
+    if action == "retry":
+        # resume at the stage that failed, keeping finished work (and any edited script)
+        stage = (c["error"] or "").split(":", 1)[0]
+        status = RETRY_FROM.get(stage, "new")
+    else:
+        status = {"approve": "approved", "reject": "rejected"}.get(action)
     if not status:
         raise HTTPException(400)
     db.update(clip_id, status=status, error=None)

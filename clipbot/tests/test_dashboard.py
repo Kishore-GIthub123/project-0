@@ -29,3 +29,22 @@ def test_record_upload(tmp_path, monkeypatch):
     row = d.db.all()[0]
     assert row["status"] == "voice_ready" and (tmp_path / "voice" / "c1.webm").exists()
     assert c.post("/clip/c1/voice", auth=a, files={"file": ("x.exe", b"1")}).status_code == 400
+
+
+def test_retry_resumes_at_failed_stage_and_unknown_clip_404(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    import clipbot.config, clipbot.dashboard
+    importlib.reload(clipbot.config)
+    d = importlib.reload(clipbot.dashboard)
+    from fastapi.testclient import TestClient
+    c, a = TestClient(d.app), ("admin", "change-me")
+    expected = {"mix: boom": "voice_ready", "tts: boom": "script_ready", "script: boom": "needs_script",
+                "publish: boom": "approved", "edit: boom": "new", None: "new"}
+    for i, (err, want) in enumerate(expected.items()):
+        cid = f"c{i}"
+        d.db.add_clip({"id": cid, "broadcaster_name": "S", "title": "t", "url": "u", "view_count": 1, "created_at": "x"})
+        d.db.update(cid, status="failed", error=err, script="my edited script")
+        assert c.post(f"/clip/{cid}/retry", auth=a, follow_redirects=False).status_code == 303
+        row = d.db.conn.execute("SELECT status, script FROM clips WHERE id=?", (cid,)).fetchone()
+        assert row["status"] == want and row["script"] == "my edited script"
+    assert c.post("/clip/NOPE/approve", auth=a, follow_redirects=False).status_code == 404

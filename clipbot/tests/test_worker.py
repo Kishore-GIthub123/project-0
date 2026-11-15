@@ -96,6 +96,17 @@ def test_mix_extends_video_to_voice_length(tmp_path):
     assert info["audio"] and 4.8 < info["duration"] < 5.5
 
 
+def test_mix_keeps_game_audio_after_voice_ends(tmp_path):
+    src, voice = tmp_path / "in.mp4", tmp_path / "v.webm"
+    make_video(src)  # 3s clip with audio
+    make_voice(voice, 1)  # 1s commentary
+    out = commentary.mix(src, voice, tmp_path / "final.mp4")
+    streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+                              "-of", "csv=p=0", str(out)], capture_output=True, text=True).stdout.split()
+    durs = {line.split(",")[0]: float(line.split(",")[1]) for line in streams}
+    assert abs(durs["audio"] - durs["video"]) < 0.1 and durs["audio"] > 2.9
+
+
 def test_commentary_flow(tmp_path):
     src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
     make_video(src)
@@ -141,3 +152,21 @@ def test_script_failure_marks_failed(tmp_path):
            transcribe=lambda *a: "", draft_script=boom).run_once()
     row = db.all()[0]
     assert row["status"] == "failed" and "no key" in row["error"]
+
+
+def test_twitch_outage_does_not_block_pipeline(tmp_path):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 1)
+
+    class DownTwitch(FakeTwitch):
+        def live_streams(self, gid):
+            raise ConnectionError("twitch down")
+
+    db = DB(tmp_path / "t.db")
+    db.add_clip(CLIP)
+    db.update("c1", status="voice_ready", voice_path=str(voice), vertical_path=str(src), edited_path=str(src))
+    w = Worker(cfg(tmp_path), db, DownTwitch())
+    w.run_once()
+    assert db.all()[0]["status"] == "pending_review"
+    assert db.get_kv("status").startswith("ERROR (Twitch)")
