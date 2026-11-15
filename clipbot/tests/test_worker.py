@@ -2,7 +2,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from clipbot import editor
+from clipbot import commentary, editor
 from clipbot.config import Config
 from clipbot.db import DB
 from clipbot.worker import Worker
@@ -31,6 +31,7 @@ def cfg(tmp_path, **kw):
     c.yt_client_id = c.yt_client_secret = c.yt_refresh_token = "x"
     c.ig_user_id = c.ig_access_token = "x"
     c.auto_approve = False
+    c.commentary_mode = False
     for k, v in kw.items():
         setattr(c, k, v)
     return c
@@ -79,3 +80,37 @@ def test_daily_limit_respected(tmp_path):
                yt_upload=lambda *a: "should-not-post", download=lambda url, d, cid: src)
     w.run_once()
     assert db.all()[0]["status"] == "approved" and db.all()[0]["yt_id"] is None
+
+
+def make_voice(path: Path, seconds=5):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency=220:duration={seconds}",
+                    "-c:a", "libopus", str(path)], check=True)
+
+
+def test_mix_extends_video_to_voice_length(tmp_path):
+    src, voice = tmp_path / "in.mp4", tmp_path / "v.webm"
+    make_video(src)  # 3s clip
+    make_voice(voice, 5)  # 5s commentary
+    out = commentary.mix(editor.to_vertical(src, tmp_path / "vert.mp4"), voice, tmp_path / "final.mp4")
+    info = commentary.probe(out)
+    assert info["audio"] and 4.8 < info["duration"] < 5.5
+
+
+def test_commentary_flow(tmp_path):
+    src, voice = tmp_path / "src.mp4", tmp_path / "v.webm"
+    make_video(src)
+    make_voice(voice, 2)
+    db = DB(tmp_path / "t.db")
+    posted = []
+    w = Worker(cfg(tmp_path, commentary_mode=True, ig_user_id=""), db, FakeTwitch(),
+               yt_upload=lambda cfg, path, title, desc, tags: posted.append(title) or "yt1",
+               download=lambda url, d, cid: src)
+    w.run_once()
+    assert db.counts() == {"needs_voiceover": 1} and posted == []
+    db.update("c1", voice_path=str(voice), status="voice_ready")
+    w.run_once()
+    row = db.all()[0]
+    assert row["status"] == "pending_review" and row["edited_path"].endswith("final/c1.mp4")
+    db.update("c1", status="approved")
+    w.run_once()
+    assert db.all()[0]["status"] == "published" and posted[0].startswith("Reacting to Streamer")

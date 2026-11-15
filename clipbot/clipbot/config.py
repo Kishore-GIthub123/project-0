@@ -21,6 +21,7 @@ class Config:
     allowed_broadcasters: list[str] = field(default_factory=lambda: _list(os.getenv("ALLOWED_BROADCASTERS", "")))
     min_clip_views: int = int(os.getenv("MIN_CLIP_VIEWS", "50"))
     lookback_hours: int = int(os.getenv("LOOKBACK_HOURS", "24"))
+    commentary_mode: bool = os.getenv("COMMENTARY_MODE", "true").lower() == "true"
     auto_approve: bool = os.getenv("AUTO_APPROVE", "false").lower() == "true"
 
     twitch_client_id: str = os.getenv("TWITCH_CLIENT_ID", "")

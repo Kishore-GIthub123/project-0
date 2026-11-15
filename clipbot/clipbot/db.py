@@ -8,11 +8,11 @@ CREATE TABLE IF NOT EXISTS clips (
     id TEXT PRIMARY KEY,
     broadcaster TEXT, title TEXT, url TEXT, view_count INTEGER,
     created_at TEXT, status TEXT, raw_path TEXT, edited_path TEXT,
-    yt_id TEXT, ig_id TEXT, error TEXT, updated_at TEXT
+    yt_id TEXT, ig_id TEXT, voice_path TEXT, error TEXT, updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT);
 """
-# status flow: new -> edited -> pending_review|approved -> published | failed | rejected
+# status flow: new -> [needs_voiceover -> voice_ready ->] pending_review|approved -> published | failed | rejected
 
 
 def now() -> str:
@@ -25,6 +25,9 @@ class DB:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(clips)")}
+        if "voice_path" not in cols:
+            self.conn.execute("ALTER TABLE clips ADD COLUMN voice_path TEXT")
 
     def add_clip(self, c: dict) -> bool:
         cur = self.conn.execute(
