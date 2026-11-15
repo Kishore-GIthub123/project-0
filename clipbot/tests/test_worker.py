@@ -101,16 +101,43 @@ def test_commentary_flow(tmp_path):
     make_video(src)
     make_voice(voice, 2)
     db = DB(tmp_path / "t.db")
-    posted = []
+    posted, spoken = [], []
+
+    def speak(text, out, models, v, speed):
+        spoken.append(text)
+        return voice
+
     w = Worker(cfg(tmp_path, commentary_mode=True, ig_user_id=""), db, FakeTwitch(),
                yt_upload=lambda cfg, path, title, desc, tags: posted.append(title) or "yt1",
-               download=lambda url, d, cid: src)
-    w.run_once()
-    assert db.counts() == {"needs_voiceover": 1} and posted == []
-    db.update("c1", voice_path=str(voice), status="voice_ready")
+               download=lambda url, d, cid: src,
+               transcribe=lambda *a: "let's go chat",
+               draft_script=lambda title, streamer, tr, secs, model: f"Hook! {streamer} {tr} {secs:.0f}s",
+               speak=speak)
     w.run_once()
     row = db.all()[0]
-    assert row["status"] == "pending_review" and row["edited_path"].endswith("final/c1.mp4")
+    assert row["status"] == "pending_review" and posted == []
+    assert row["script"] == "Hook! Streamer let's go chat 3s" and row["transcript"] == "let's go chat"
+    assert row["edited_path"].endswith("final/c1.mp4") and row["vertical_path"].endswith("edited/c1.mp4")
+
+    # edit script -> voice regenerated from the clean vertical video, not the mixed one
+    db.update("c1", script="My edited take", status="script_ready")
+    w.run_once()
+    assert spoken[-1] == "My edited take" and db.all()[0]["status"] == "pending_review"
+
     db.update("c1", status="approved")
     w.run_once()
     assert db.all()[0]["status"] == "published" and posted[0].startswith("Reacting to Streamer")
+
+
+def test_script_failure_marks_failed(tmp_path):
+    src = tmp_path / "src.mp4"
+    make_video(src)
+    db = DB(tmp_path / "t.db")
+
+    def boom(*a):
+        raise RuntimeError("no key")
+
+    Worker(cfg(tmp_path, commentary_mode=True), db, FakeTwitch(), download=lambda url, d, cid: src,
+           transcribe=lambda *a: "", draft_script=boom).run_once()
+    row = db.all()[0]
+    assert row["status"] == "failed" and "no key" in row["error"]

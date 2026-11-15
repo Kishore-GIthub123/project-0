@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import commentary, editor, instagram, youtube
+from . import commentary, editor, instagram, scriptwriter, transcribe, tts, youtube
 from .config import Config
 from .db import DB, now
 from .twitch import Twitch
@@ -16,10 +16,12 @@ log = logging.getLogger("clipbot")
 class Worker:
     def __init__(self, cfg: Config, db: DB, twitch: Twitch,
                  yt_upload=youtube.upload, ig_upload=instagram.upload,
-                 download=editor.download, to_vertical=editor.to_vertical, mix=commentary.mix):
+                 download=editor.download, to_vertical=editor.to_vertical, mix=commentary.mix,
+                 transcribe=transcribe.transcribe, draft_script=scriptwriter.draft, speak=tts.speak):
         self.cfg, self.db, self.tw = cfg, db, twitch
         self.yt_upload, self.ig_upload = yt_upload, ig_upload
         self.download, self.to_vertical, self.mix = download, to_vertical, mix
+        self.transcribe, self.draft_script, self.speak = transcribe, draft_script, speak
         self.game_id: str | None = None
 
     def status(self, msg: str):
@@ -45,8 +47,8 @@ class Worker:
             try:
                 raw = self.download(c["url"], raw_dir, c["id"])
                 edited = self.to_vertical(raw, out_dir / f"{c['id']}.mp4")
-                self.db.update(c["id"], raw_path=str(raw), edited_path=str(edited),
-                               status="needs_voiceover" if self.cfg.commentary_mode else self._ready())
+                self.db.update(c["id"], raw_path=str(raw), edited_path=str(edited), vertical_path=str(edited),
+                               status="needs_script" if self.cfg.commentary_mode else self._ready())
             except Exception as e:  # noqa: BLE001
                 log.exception("edit failed %s", c["id"])
                 self.db.update(c["id"], status="failed", error=f"edit: {e}")
@@ -54,10 +56,36 @@ class Worker:
     def _ready(self) -> str:
         return "approved" if self.cfg.auto_approve else "pending_review"
 
+    def process_scripts(self):
+        models = self.cfg.data_dir / "models"
+        for c in self.db.by_status("needs_script"):
+            try:
+                try:
+                    transcript = self.transcribe(Path(c["raw_path"]), self.cfg.whisper_model, models)
+                except Exception:  # noqa: BLE001 - script can still be written from the title
+                    log.exception("transcribe failed %s", c["id"])
+                    transcript = ""
+                seconds = commentary.probe(Path(c["vertical_path"]))["duration"]
+                script = self.draft_script(c["title"], c["broadcaster"], transcript, seconds, self.cfg.claude_model)
+                self.db.update(c["id"], transcript=transcript, script=script, status="script_ready", error=None)
+            except Exception as e:  # noqa: BLE001
+                log.exception("script failed %s", c["id"])
+                self.db.update(c["id"], status="failed", error=f"script: {e}")
+
+    def process_tts(self):
+        for c in self.db.by_status("script_ready"):
+            try:
+                voice = self.speak(c["script"], self.cfg.data_dir / "voice" / f"{c['id']}.wav",
+                                   self.cfg.data_dir / "models", self.cfg.kokoro_voice, self.cfg.kokoro_speed)
+                self.db.update(c["id"], voice_path=str(voice), status="voice_ready", error=None)
+            except Exception as e:  # noqa: BLE001
+                log.exception("tts failed %s", c["id"])
+                self.db.update(c["id"], status="failed", error=f"tts: {e}")
+
     def process_voiced(self):
         for c in self.db.by_status("voice_ready"):
             try:
-                final = self.mix(Path(c["edited_path"]), Path(c["voice_path"]),
+                final = self.mix(Path(c["vertical_path"] or c["edited_path"]), Path(c["voice_path"]),
                                  self.cfg.data_dir / "final" / f"{c['id']}.mp4")
                 self.db.update(c["id"], edited_path=str(final), status=self._ready(), error=None)
             except Exception as e:  # noqa: BLE001
@@ -109,6 +137,8 @@ class Worker:
             return
         added = self.discover()
         self.process_new()
+        self.process_scripts()
+        self.process_tts()
         self.process_voiced()
         self.publish()
         self.status(f"Active: {added} new clips this run")

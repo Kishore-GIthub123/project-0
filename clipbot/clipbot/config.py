@@ -22,6 +22,10 @@ class Config:
     min_clip_views: int = int(os.getenv("MIN_CLIP_VIEWS", "50"))
     lookback_hours: int = int(os.getenv("LOOKBACK_HOURS", "24"))
     commentary_mode: bool = os.getenv("COMMENTARY_MODE", "true").lower() == "true"
+    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
+    kokoro_voice: str = os.getenv("KOKORO_VOICE", "am_michael")
+    kokoro_speed: float = float(os.getenv("KOKORO_SPEED", "1.05"))
+    whisper_model: str = os.getenv("WHISPER_MODEL", "base.en")
     auto_approve: bool = os.getenv("AUTO_APPROVE", "false").lower() == "true"
 
     twitch_client_id: str = os.getenv("TWITCH_CLIENT_ID", "")

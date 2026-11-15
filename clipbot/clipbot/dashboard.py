@@ -5,7 +5,7 @@ import secrets
 
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -38,13 +38,8 @@ def index():
     for c in db.all():
         cid = e(c["id"])
         actions = ""
-        if c["status"] == "needs_voiceover":
-            actions = (f"<a class=btn href='/clip/{cid}/voice'>🎙 Record</a>"
-                       f"<form method=post action='/clip/{cid}/reject'><button>Skip</button></form>")
-        elif c["status"] == "pending_review":
-            actions = (f"<a href='/media/{cid}' target=_blank>Preview</a> "
-                       f"<form method=post action='/clip/{cid}/approve'><button>Approve</button></form>"
-                       f"<form method=post action='/clip/{cid}/reject'><button>Reject</button></form>")
+        if c["status"] == "pending_review":
+            actions = f"<a class=btn href='/clip/{cid}/review'>Review</a>"
         elif c["status"] == "failed":
             actions = f"<form method=post action='/clip/{cid}/retry'><button>Retry</button></form>"
         yt = f"<a href='https://youtube.com/shorts/{e(c['yt_id'])}'>YT</a>" if c["yt_id"] else ""
@@ -142,6 +137,41 @@ async def voice_upload(clip_id: str, file: UploadFile = File(...)):
     db.update(clip_id, voice_path=str(out), status="voice_ready", error=None)
     return RedirectResponse("/", status_code=303)
 
+
+
+@app.get("/clip/{clip_id}/review", response_class=HTMLResponse, dependencies=[Depends(auth)])
+def review_page(clip_id: str):
+    c = _clip(clip_id)
+    cid = e(c["id"])
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1"><title>Review clip</title>
+<style>body{{font-family:system-ui;margin:16px;background:#111;color:#eee;max-width:560px}}
+video{{width:100%;max-height:65vh;background:#000}}textarea{{width:100%;min-height:140px;font-size:16px;
+background:#1c1c1c;color:#eee;border:1px solid #444;border-radius:6px;padding:8px;box-sizing:border-box}}
+button{{font-size:16px;padding:10px 14px;margin:6px 6px 0 0}}.ok{{background:#2a6;color:#fff;border:0;border-radius:6px}}
+.tip{{color:#aaa;font-size:14px}}a{{color:#6cf}}details{{margin-top:12px}}</style></head><body>
+<a href="/">← back</a><h2>{e(c['broadcaster'])}: {e(c['title'])}</h2>
+<video src="/media/{cid}" controls playsinline></video>
+<form method=post action="/clip/{cid}/approve"><button class=ok>✓ Approve &amp; post</button></form>
+<form method=post action="/clip/{cid}/reject"><button>✕ Reject</button></form>
+<h3>AI script</h3>
+<form method=post action="/clip/{cid}/script">
+<textarea name=script maxlength=2000>{e(c['script'])}</textarea>
+<button>Save &amp; regenerate voice</button></form>
+<p class=tip>The new voice is ready in about a minute; the clip shows up under Review again.</p>
+<details><summary>Transcript of the clip</summary><p class=tip>{e(c['transcript']) or 'none'}</p></details>
+<details><summary>Use your own audio instead</summary><p><a href="/clip/{cid}/voice">Upload audio</a></p></details>
+</body></html>"""
+
+
+@app.post("/clip/{clip_id}/script", dependencies=[Depends(auth)])
+def save_script(clip_id: str, script: str = Form(...)):
+    _clip(clip_id)
+    script = script.strip()
+    if not script or len(script) > 2000:
+        raise HTTPException(400, "script must be 1-2000 characters")
+    db.update(clip_id, script=script, status="script_ready", error=None)
+    return RedirectResponse("/", status_code=303)
 
 # generic route last so /clip/{id}/voice is matched first
 @app.post("/clip/{clip_id}/{action}", dependencies=[Depends(auth)])
